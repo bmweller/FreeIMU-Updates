@@ -253,6 +253,31 @@ GNU General Public License for more details.
 -------- An example file has been created to show the DCM implementation with euler angle output.
 -------- Use existing Serial sketches for use with processing. No other changes are needed.
 --------------------------------------------------------------------------
+07-18-15 Added two Kalman filter sketches using the output of the FreeIMU library. The first is the Kalman 
+-------- implementation by Kristian Lauszus, TKJ Eectronics, http://www.tkjelectronics.com, using his modified sketch 
+-------- that will compare the FreeIMU filter selected to that of the Kalman filter. The Arduino sketch is 
+-------- FreeIMU_KalmanV1.ino. The sketch requires the StandardCplusplus lib - please use the version on my github 
+-------- page as I had to make changes to it to work with the mega and other arduino boards per a issue description 
+-------- from the library.
+-------- 
+-------- The second implementaion uses the Kalman class from Picopter - Matthew Watson authored on Apr 29 2013,
+--------  https://github.com/big5824/Picopter.git. The sketch uses the ArduinoEigen Library and the stlport library 
+-------- which I hava also uploaded so please refresh your download. The sketch for this implementation is 
+-------- FreeIMU_EKF2. I also uploaded a processing sketch from Adafruit (Bunnyrotate.pde) for their AHRS 
+-------- implementation demo. It uses the Saito object loader. I did make a few modifications including getting 
+-------- rid of the bunny and use the Cassini model that comes with Saito library. This I also uploaded in the 
+-------- Experimental directory.
+--------------------------------------------------------------------------
+07-24-15 Completed adding support for the LSM9DS0 iNemo IMU. Made use of the Sparkfun LSM9DS0 library. Thanks 
+-------- to the guys at Sparkfun, I owe you guys at SFE a few beers. I did have to make a minor modification to the 
+-------- library to make it callable from the FreeIMU class. 
+---------------------------------------------------------------------------
+08-24-15 Added support for the MS5637 Pressure Sensor using a slightly modified version of the Freetronics
+-------- library.  All sketches were updated according.
+---------------------------------------------------------------------------
+08-25-15 Added 360 degree Euler angle rotation function. Also fixed an issue with val array out of bounds
+------- preventing correct angles being returned when angle functions are returned.
+---------------------------------------------------------------------------
 */
 
 #include "Arduino.h"
@@ -370,25 +395,30 @@ FreeIMU::FreeIMU() {
   #elif HAS_MPU9250()
     accgyro = MPU60X0();
 	mag = AK8963();
-	maghead = iCompass(MAG_DEC, WINDOW_SIZE, 500);  
+	maghead = iCompass(MAG_DEC, WINDOW_SIZE, 500);
+  #elif HAS_LSM9DS0()
+	//lsm = LSM9DS0(MODE_I2C, LSM9DS0_G, LSM9DS0_XM);
+	lsm = LSM9DS0(MODE_I2C, LSM9DS0_G, LSM9DS0_XM);
+	maghead = iCompass(MAG_DEC, WINDOW_SIZE, 500);	
   #endif
     
-  #if HAS_MS5611()
-	#if HAS_APM25()
-		baro = AP_Baro_MS5611();
-	#else
-		baro = MS561101BA();
-	#endif
-  #elif HAS_BMP085()
-    baro085 = BMP085();
-  #elif HAS_LPS331()
-    baro331 = LPS331();
-  #elif HAS_MPL3115A2()
-    baro3115 = MPL3115A2();
-  #endif
-  
   #if HAS_PRESS()
     kPress.KalmanInit(0.0000005,0.01,1.0,0);
+    #if HAS_MS5611()
+	    #if HAS_APM25()
+		    baro = AP_Baro_MS5611();
+	    #else
+		    baro = MS561101BA();
+	    #endif
+      #elif HAS_BMP085()
+        baro085 = BMP085();
+      #elif HAS_LPS331()
+        baro331 = LPS331();
+      #elif HAS_MPL3115A2()
+        baro3115 = MPL3115A2();
+	  #elif HAS_MS5637()
+	    baro5637 = BaroSensorClass();
+      #endif
   #endif
   
   // initialize quaternion
@@ -453,6 +483,8 @@ void FreeIMU::init() {
 	pinMode(40, OUTPUT);
     digitalWrite(40, HIGH);
 	init(53, false);
+  #elif HAS_LSM9DS0()
+	init0(true);	
   #else
 	init(FIMU_ACCGYRO_ADDR, false);
   #endif
@@ -468,6 +500,8 @@ void FreeIMU::init(bool fastmode) {
 	pinMode(40, OUTPUT);
     digitalWrite(40, HIGH);
 	init(53, fastmode);
+  #elif HAS_LSM9DS0()
+	init0(fastmode);
   #else
 	init(FIMU_ACCGYRO_ADDR, fastmode);
   #endif
@@ -518,7 +552,7 @@ void FreeIMU::RESET_Q() {
 */
 #if HAS_ITG3200()
 	void FreeIMU::init(int acc_addr, int gyro_addr, bool fastmode) {
-#elif HAS_ALTIMU10()
+#elif HAS_ALTIMU10() || HAS_LSM9DS0()
 	void FreeIMU::init0(bool fastmode) {
 #else
 	void FreeIMU::init(int accgyro_addr, bool fastmode) {
@@ -654,6 +688,19 @@ void FreeIMU::RESET_Q() {
 	delay(5);
   #endif 
   
+  #if HAS_LSM9DS0()
+	// Use the begin() function to initialize the LSM9DS0 library.
+	// You can either call it with no parameters (the easy way):
+	uint16_t status = lsm.begin(lsm.G_SCALE_2000DPS, lsm.A_SCALE_2G );
+	// Or call it with declarations for sensor scales and data rates:  
+	//uint16_t status = lsm.begin(lsm.G_SCALE_2000DPS, 
+	//                            lsm.A_SCALE_6G, lsm.M_SCALE_2GS);
+	//Angular rate FS = ±245 dps, gyro_sensitivity = 8.75
+	//Angular rate FS = ±500 dps, gyro_sensitivity =  17.50
+	//Angular rate FS = ±2000 dps, gyro_sensitivity =  70
+	gyro_sensitivity = 70.0f;
+  #endif
+  
   #if HAS_HMC5883L()
 	// init HMC5843
 	magn.init(false); // Don't set mode yet, we'll do that later on.
@@ -687,7 +734,7 @@ void FreeIMU::RESET_Q() {
 	baro3115.setOversampleRate(4); // Set Oversample to the recommended 128 --> 512ms
 	baro3115.enableEventFlags(); // Enable all three pressure and temp event flags 
   #endif  
-  
+   
   #if HAS_BMP085()
 	// 19.8 meters for my location, true = using meter units
     // this initialization is useful if current altitude is known,
@@ -695,6 +742,10 @@ void FreeIMU::RESET_Q() {
 	//baro085.init(3, 1981.6469, true);  
 	//Changed Init to default pressure
 	baro085.init();
+  #endif
+  
+  #if HAS_MS5637()
+	baro5637.begin();
   #endif
   
   //ALTIMU SENSOR INIT
@@ -706,7 +757,7 @@ void FreeIMU::RESET_Q() {
 	//+/-500:        0x10	17.5
 	//+/- 2000:      0x20	70
 	gyro.writeReg(0x23, 0x20);
-	gyro_sensitivity = 70.0f
+	gyro_sensitivity = 70.0f;
   #endif
   
   #if HAS_LSM303()
@@ -915,7 +966,24 @@ void FreeIMU::getRawValues(int * raw_values) {
     raw_values[7] = compass.m.y;
     raw_values[8] = compass.m.z;
   #endif	
-  
+
+  #if HAS_LSM9DS0()
+	lsm.readAccel();
+	lsm.readGyro();
+	lsm.readMag();
+    raw_values[0] = lsm.ax;
+    raw_values[1] = lsm.ay;
+    raw_values[2] = lsm.az;
+    raw_values[6] = lsm.mx;
+    raw_values[7] = lsm.my;
+    raw_values[8] = lsm.mz;
+    raw_values[3] = lsm.gx;
+    raw_values[4] = lsm.gy;
+    raw_values[5] = lsm.gz;	
+	lsm.readTemp();
+	DTemp = lsm.temperature;
+	raw_values[9] = DTemp;
+  #endif
 }
 
 
@@ -976,7 +1044,27 @@ void FreeIMU::getValues(float * values) {
 	values_cal[3] = (values_cal[3] - gyro_off_x) / gyro_sensitivity;  //Sensitivity set at 70 for +/-2000 deg/sec, L3GD20H
 	values_cal[4] = (values_cal[4] - gyro_off_y) / gyro_sensitivity;
 	values_cal[5] = (values_cal[5] - gyro_off_z) / gyro_sensitivity;
+
+  #elif HAS_LSM9DS0()
+	lsm.readAccel();
+	lsm.readGyro();
+	lsm.readMag();
+    values_cal[0] = (float) lsm.ax;
+    values_cal[1] = (float) lsm.ay;
+    values_cal[2] = (float) lsm.az;
+    values_cal[6] = (float) lsm.mx;
+    values_cal[7] = (float) lsm.my;
+    values_cal[8] = (float) lsm.mz;
+    values_cal[3] = (float) lsm.gx;
+    values_cal[4] = (float) lsm.gy;
+    values_cal[5] = (float) lsm.gz;	 
 	
+	values_cal[3] = (values_cal[3] - gyro_off_x) / gyro_sensitivity;  //Sensitivity set at 70 for +/-2000 deg/sec, L3GD20H
+	values_cal[4] = (values_cal[4] - gyro_off_y) / gyro_sensitivity;
+	values_cal[5] = (values_cal[5] - gyro_off_z) / gyro_sensitivity;
+
+	lsm.readTemp();
+	DTemp = lsm.temperature;
   #else  // MPU6050
     int16_t accgyroval[9];
 	#if HAS_MPU9150() || HAS_MPU9250()
@@ -1051,7 +1139,7 @@ void FreeIMU::getValues(float * values) {
     magn.getValues(&values_cal[6]);
   #endif
   
-  #if HAS_HMC5883L() || HAS_MPU9150() || HAS_MPU9250() || HAS_LSM303()
+  #if HAS_HMC5883L() || HAS_MPU9150() || HAS_MPU9250() || HAS_LSM303() || HAS_LSM9DS0()
     // calibration
 	if(temp_corr_on == 1) {
 		values_cal[6] = (values_cal[6] - acgyro_corr[6] - magn_off_x) / magn_scale_x;
@@ -1127,7 +1215,7 @@ void FreeIMU::initGyros() {
 	
     // we try to get a good calibration estimate for up to 10 seconds
     // if the gyros are stable, we should get it in 1 second
-	for (int16_t j = 0; j <= 10 && num_converged < num_gyros; j++) {
+	for (int16_t j = 0; j <= 30 && num_converged < num_gyros; j++) {
 		Vector3f gyro_sum[INS_MAX_INSTANCES], gyro_avg[INS_MAX_INSTANCES], gyro_diff[INS_MAX_INSTANCES];
 		float diff_norm[INS_MAX_INSTANCES];
 		
@@ -1196,7 +1284,7 @@ void FreeIMU::initGyros() {
  * @param q the quaternion to populate
 */
 void FreeIMU::getQ(float * q, float * val) {
-  //float val[11];
+  //float val[12];
   getValues(val);
   //DEBUG_PRINT(val[3] * M_PI/180);
   //DEBUG_PRINT(val[4] * M_PI/180);
@@ -1252,11 +1340,11 @@ void FreeIMU::getQ(float * q, float * val) {
 	
   MotionDetect( val );
 
-  #if IS_9DOM() && not defined(DISABLE_MAGN)
-	if(val[11] - motiondetect_old < 0) {  
-		getQ_simple(q, val);
-	}
-  #endif
+  //#if IS_9DOM() && not defined(DISABLE_MAGN)
+	//if(val[11] - motiondetect_old < 0) {  
+	//	getQ_simple(q, val);
+	//}
+  //#endif
  
   motiondetect_old = val[11];
   
@@ -1373,7 +1461,6 @@ float def_sea_press = 1013.25;
 #endif
 
 #if HAS_LPS331()
-
 	// Returns temperature from LPS331 - added by MJS
 	float FreeIMU::getBaroTemperature() {
 		float temp1 = baro331.readTemperatureC();		
@@ -1444,6 +1531,42 @@ float def_sea_press = 1013.25;
 	}	
 #endif
 
+#if HAS_MS5637()
+	// Returns temperature, pressure and altitude from MS5637
+	// from the Freetronics library
+	
+	float FreeIMU::getBaroTemperature() {
+		float temp1 = baro5637.getTemperature();
+		// also available in °F float temp1 = baro3115.readTempF();
+		return(temp1);
+	}
+
+	float FreeIMU::getBaroPressure() {
+		// 1 kPa = 10 hPa = 1000 Pa
+		// 100 Pascals = 1 hPa = 1 mb
+		// sensor output is in Pa
+		// need to convert Pascals to millibars:
+		float new_press = baro5637.getPressure() ;
+		return(new_press);
+	}
+
+	/**
+	* Returns an altitude estimate from baromether readings only using a default sea level pressure
+	*/
+	float FreeIMU::getBaroAlt() {
+		return getBaroAlt(def_sea_press);
+	}
+
+	/**
+	* Returns an altitude estimate from barometer readings only using sea_press as current sea level pressure
+	*/
+	float FreeIMU::getBaroAlt(float sea_press) {
+		float temp = baro5637.getTemperature();
+		float press = baro5637.getPressure();
+        float new_press = kPress.measureRSSI(press);
+		return ((pow((sea_press / new_press), 1/5.257) - 1.0) * (temp + 273.15)) / 0.0065;
+	}	
+#endif
 
 /**
  * Returns the estimated altitude from fusing barometer and accelerometer
@@ -1453,7 +1576,7 @@ float def_sea_press = 1013.25;
 float FreeIMU::getEstAltitude(float * q1, float * val, float dt2) {
   //float q1[4]; // quaternion
   float q2[4]; // quaternion
-  //float val[11];
+  //float val[12];
   float dyn_acc[4];
   float dyn_acc_temp[4];
   float dyn_acc_earth[4];
@@ -1498,7 +1621,7 @@ float FreeIMU::getEstAltitude(float * q1, float * val, float dt2) {
 */
 void FreeIMU::getEulerRad(float * angles) {
   float q[4]; // quaternion
-  float val[11];
+  float val[12];
   
   getQ(q, val);
   angles[0] = atan2(2 * q[1] * q[2] - 2 * q[0] * q[3], 2 * q[0]*q[0] + 2 * q[1] * q[1] - 1); // psi
@@ -1519,6 +1642,68 @@ void FreeIMU::getEuler(float * angles) {
   arr3_rad_to_deg(angles);
 }
 
+/**
+ * Returns the Euler angles in degrees defined with the Aerospace sequence (NED).  Conversion
+ * based on MATLAB quat2angle.m for an ZXY rotation sequence. euler[0] = yaw, euler[1]=pitch and euler[2] = roll
+ * Angles are lie between 0-360 degrees.  
+ * 
+ * @param angles three floats array which will be populated by the Euler angles in degrees
+*/
+void FreeIMU::getEuler360deg(float * angles) {
+  float m11, m12, m21, m31, m32;
+  float gx, gy, gz; // estimated gravity direction
+  float q[4]; // quaternion
+  float val[12];
+  
+  getQ(q, val);
+  
+  gx = 2 * (q[1]*q[3] - q[0]*q[2]);
+  gy = 2 * (q[0]*q[1] + q[2]*q[3]);
+  gz = q[0]*q[0] - q[1]*q[1] - q[2]*q[2] + q[3]*q[3];
+    
+  m11 = 2.*(q[1]*q[2] + q[0]*q[3]);
+  m12 = q[0]*q[0] + q[1]*q[1] - q[2]*q[2] - q[3]*q[3];
+  m21 = -2.*(q[1]*q[3] - q[0]*q[2]);               
+  m31 = 2.*(q[2]*q[3] + q[0]*q[1]);              
+  m32 = q[0]*q[0] - q[1]*q[1] - q[2]*q[2] + q[3]*q[3];
+
+  // find angles for rotations about X, Y, and Z axes
+  angles[0] = -atan2( m11, m12 ) * 57.2957795;
+  angles[1] = -asin( m21 ) * 57.2957795;
+  angles[2] = -atan2( m31, m32 ) * 57.2957795;
+    
+  //  	Gx	gy	gz
+  //0-90	"+"		"+"
+  //90-180	"+"		"-"
+  //180-270	"-"		"-"
+  //270-360	"-"		"+"
+    
+  if(gx >= 0 && gz < 0)
+      angles[1] = 180. - angles[1];
+     else if(gx < 0 && gz < 0)
+       angles[1] = 180. - angles[1];
+      else if(gx < 0 && gz >=0)
+        angles[1] = 360. + angles[1];
+        
+  if(angles[0] < 0) angles[0] = 360. + angles[0];
+  if(angles[2] < 0) angles[2] = 360. + angles[2];
+  
+  angles[0] = 360 - angles[0];
+  
+}
+
+/**
+ * Returns the Euler angles in degrees defined with the Aerospace sequence (NED).  Conversion
+ * based on MATLAB quat2angle.m for an ZXY rotation sequence.
+ * Angles are lie between 0-360 degrees in radians.
+ * 
+ * @param angles three floats array which will be populated by the Euler angles in degrees
+*/
+void FreeIMU::getEuler360(float * angles) {
+  getEulerRad(angles);
+  arr3_deg_to_rad(angles);
+}
+
 
 /**
  * Returns the yaw pitch and roll angles, respectively defined as the angles in radians between
@@ -1532,7 +1717,7 @@ void FreeIMU::getEuler(float * angles) {
 */
 void FreeIMU::getYawPitchRollRad(float * ypr) {
   float q[4]; // quaternion
-  float val[11];
+  float val[12];
   float gx, gy, gz; // estimated gravity direction
   getQ(q, val);
   
@@ -1557,7 +1742,7 @@ void FreeIMU::getYawPitchRollRad(float * ypr) {
 */
 void FreeIMU::getYawPitchRollRadAHRS(float * ypr, float * q) {
   //float q[4]; // quaternion
-  //float val[11];
+  //float val[12];
   float gx, gy, gz; // estimated gravity direction
   //getQ(q, val);
   
@@ -1584,7 +1769,7 @@ void FreeIMU::getYawPitchRollRadAHRS(float * ypr, float * q) {
 */
 void FreeIMU::getYawPitchRoll180(float * ypr) {
 	float q[4];				// quaternion
-	float val[11];
+	float val[12];
 	float gx, gy, gz;		// estimated gravity direction
 	
 	getQ(q, val);
@@ -1875,6 +2060,15 @@ void arr3_rad_to_deg(float * arr) {
   arr[0] *= 180/M_PI;
   arr[1] *= 180/M_PI;
   arr[2] *= 180/M_PI;
+}
+
+/**
+ * Converts a 3 elements array arr of angles expressed in degrees into radians
+*/
+void arr3_deg_to_rad(float * arr) {
+  arr[0] /= 180/M_PI;
+  arr[1] /= 180/M_PI;
+  arr[2] /= 180/M_PI;
 }
 
 /* Madgwick IMU/AHRS and Fast Inverse Square Root
